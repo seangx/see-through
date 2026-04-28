@@ -8,8 +8,13 @@ from modules.layerdiffuse.layerdiff3d import UNetFrameConditionModel
 from modules.marigold import MarigoldDepthPipeline
 from utils.cv import center_square_pad_resize, img_alpha_blending, smart_resize, validate_resolution
 from utils.torch_utils import seed_everything
+from utils.device_utils import get_device, get_dtype, supports_offload, empty_cache
 from utils.io_utils import json2dict, dict2json, load_parts, save_tmp_img, load_part, save_psd
 from utils.torchcv import cluster_inpaint_part
+
+DEVICE = get_device()
+DTYPE = get_dtype(DEVICE)
+print(f"[device_utils] DEVICE={DEVICE} DTYPE={DTYPE}")
 
 from psd_tools import PSDImage
 from safetensors.torch import load_file
@@ -62,13 +67,15 @@ def apply_layerdiff(
                 layerdiff_pipeline.trans_vae.decoder.load_state_dict(td_sd)
                 print(f'load vae from {vae_ckpt}')
 
-        layerdiff_pipeline.vae.to(dtype=torch.bfloat16, device='cuda')
-        layerdiff_pipeline.trans_vae.to(dtype=torch.bfloat16, device='cuda')
-        layerdiff_pipeline.unet.to(dtype=torch.bfloat16, device='cuda')
-        layerdiff_pipeline.text_encoder.to(dtype=torch.bfloat16, device='cuda')
-        layerdiff_pipeline.text_encoder_2.to(dtype=torch.bfloat16, device='cuda')
-        if group_offload:
-            layerdiff_pipeline.enable_group_offload('cuda', num_blocks_per_group=1)
+        layerdiff_pipeline.vae.to(dtype=DTYPE, device=DEVICE)
+        layerdiff_pipeline.trans_vae.to(dtype=DTYPE, device=DEVICE)
+        layerdiff_pipeline.unet.to(dtype=DTYPE, device=DEVICE)
+        layerdiff_pipeline.text_encoder.to(dtype=DTYPE, device=DEVICE)
+        layerdiff_pipeline.text_encoder_2.to(dtype=DTYPE, device=DEVICE)
+        if group_offload and supports_offload(DEVICE):
+            layerdiff_pipeline.enable_group_offload(DEVICE, num_blocks_per_group=1)
+        elif group_offload:
+            print(f"[mac-mps] group_offload requested but not supported on {DEVICE}; skipping")
 
     pipeline = layerdiff_pipeline
     if cache_tag_embeds:
@@ -192,10 +199,12 @@ def apply_marigold(srcp, pretrained: str, num_inference_steps=-1, seed=0, save_d
     if marigold_pipeline is None:
         unet = UNetFrameConditionModel.from_pretrained(pretrained, subfolder='unet')
         marigold_pipeline = MarigoldDepthPipeline.from_pretrained(pretrained, unet=unet)
-        marigold_pipeline.to(device='cuda', dtype=torch.bfloat16)
+        marigold_pipeline.to(device=DEVICE, dtype=DTYPE)
 
-        if group_offload:
-            marigold_pipeline.enable_group_offload('cuda', num_blocks_per_group=1)
+        if group_offload and supports_offload(DEVICE):
+            marigold_pipeline.enable_group_offload(DEVICE, num_blocks_per_group=1)
+        elif group_offload:
+            print(f"[mac-mps] group_offload requested but not supported on {DEVICE}; skipping")
 
     pipe = marigold_pipeline
 
